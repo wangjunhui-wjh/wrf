@@ -1,0 +1,25 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Envs
+.venv/
+
+# Data / outputs
+data/
+processed_data/
+raw_manifest/
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+
+# Zarr stores
+*.zarr/
+
+# Local docs / temp
+*.tmp
+*.log
