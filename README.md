@@ -21,11 +21,6 @@ pip install -r requirements.txt
 
 训练需要 PyTorch，请根据显卡与 CUDA 版本安装对应的包（按官方选择器来）。
 
-如果你偏好 Conda，也可以用：
-```bash
-conda env create -f environment.yml
-conda activate wrf_env
-```
 
 ## 配置修改
 在 `src/config.py` 里确认以下路径：
