@@ -1,73 +1,88 @@
-# WRF 数据处理流水线
+﻿# WRF 风场超分辨率：数据处理、训练与评估
 
+## 功能概览
+- 从 wrfout 提取 U10/V10/T2/PSFC/PBLH 等变量，生成 HR/LR 月度 Zarr
+- 站点/雷达观测处理与评估
+- 超分模型训练、推理、网格/站点评估与出图
 
-1.  **高分辨率 (HR) 风场**：使用 `wrf-python` 提取并将风场旋转至地球坐标系（Earth Coordinates）。
-2.  **低分辨率 (LR) 风场**：通过物理一致的平均池化（Average Pooling）下采样生成，用于超分训练。
-3.  **Zarr 存储**：按月打包为 Zarr 格式，支持高效的分块读取和并行训练。
-4.  **清单与质量报告**：自动生成数据清单，检查时间连续性和缺失值。
+## 目录约定（核心输出）
+- `processed_data/hr`：WRF 高分辨率（月度 Zarr）
+- `processed_data/lr`：WRF 低分辨率（月度 Zarr，4×下采样）
+- `processed_data/pred`：模型推理输出
+- `processed_data/eval`：站点/雷达评估结果
+- `processed_data/summary`：汇总表与论文图表
 
-## 前置要求
-
-*   **Conda**：必须使用 Conda 环境，因为核心库 `wrf-python` 依赖 Fortran 编译环境。
-
-## 环境安装 (Windows/Linux)
-
-由于 `wrf-python` 的依赖性，强烈建议使用 Conda 而非 pip。
-
-### 1. 配置镜像源（推荐国内用户）
-如果下载速度慢，建议配置清华大学镜像源：
+## 环境安装（当前使用 venv）
 ```bash
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/
-conda config --set show_channel_urls yes
+python -m venv .venv
+.venv\\Scripts\\activate
+pip install -r requirements.txt
 ```
 
-### 2. 创建并激活环境
-您可以使用提供的 `environment.yml` 一键创建环境：
+训练需要 PyTorch，请根据显卡与 CUDA 版本安装对应的包（按官方选择器来）。
 
+如果你偏好 Conda，也可以用：
 ```bash
 conda env create -f environment.yml
 conda activate wrf_env
 ```
 
-或者手动创建：
-```bash
-conda create -n wrf_env python=3.10 -y
-conda activate wrf_env
-conda install -c conda-forge wrf-python xarray dask netcdf4 zarr pandas scipy matplotlib pyyaml tqdm -y
-```
+## 配置修改
+在 `src/config.py` 里确认以下路径：
+- `RAW_DATA_ROOT`：wrfout 原始数据根目录
+- `TEMP_DIR`：本地临时目录（可选）
+- `OUTPUT_DIR`：处理后数据输出目录（默认 `processed_data`）
+- `DOMAIN`：目标域（默认 `d04`）
 
-## 配置说明
-
-请根据您的实际路径修改 `src/config.py` 文件：
-
-*   `RAW_DATA_ROOT`: 移动硬盘上的原始数据根目录（例如 `E:/`）。
-*   `TEMP_DIR`: 本地 SSD 上的临时处理目录（例如 `D:/wrf_tmp`），用于加速 IO。
-*   `OUTPUT_DIR`: 处理后数据的保存目录。
-
-## 运行流水线
-
-在终端中执行以下命令启动处理：
-
+## WRF 数据处理
+一键处理（生成 HR/LR 月度 Zarr）：
 ```bash
 python run_pipeline.py
 ```
 
-## 处理流程详解
+计算归一化统计（训练/推理用）：
+```bash
+python run_compute_stats.py --hr-dir processed_data/hr --lr-dir processed_data/lr --out processed_data/stats.json
+```
 
-1.  **生成清单 (Manifest)**：
-    *   扫描原始数据目录。
-    *   生成文件列表 `raw_manifest/manifest_YYYY.csv`。
-    *   自动检查是否存在缺失的时次（如某天少于48个文件）。
+## 站点/雷达数据处理（可选）
+```bash
+python run_obs_processing.py --station-dir data/station --radar-dir data/radar --out-dir processed_data/obs
+```
 
-2.  **数据处理 (Processing)**：
-    *   **IO 优化**：将当天的文件复制到本地 SSD 临时目录处理，处理完即删，减少移动硬盘负载。
-    *   **变量提取**：优先使用 `wrf.getvar` 提取 `U10`, `V10` 等变量，自动处理风场旋转（Grid -> Earth）和去交错。
-    *   **生成 LR**：对 HR 数据进行 4x（可配置）下采样生成 LR 数据。
-    *   **格式转换**：将单月数据合并并保存为 Zarr 格式。
+## 模型训练
+默认输入变量：`U10,V10,T2,PSFC,PBLH`，目标变量：`U10,V10`。默认上采样倍率 4×。
+```bash
+python run_train_sr.py --model unet --stats processed_data/stats.json --out-dir processed_data/checkpoints
+```
 
-## 常见问题
+需要手动指定测试月可用：
+```bash
+python run_train_sr.py --model unet --stats processed_data/stats.json --test-months 2025-10 --exclude-months 2025-09
+```
 
-*   **找不到 `wrf-python`**：请确保您已通过 `conda activate wrf_env` 激活了环境。
-*   **安装时网络错误**：请尝试配置上述的国内镜像源。
+## 推理
+```bash
+python run_infer_sr.py --model unet --weights processed_data/checkpoints/unet_x4/best.pt --months 2025-10 --stats processed_data/stats.json --out processed_data/pred/pred_unet_2025-10.zarr
+```
+
+## 评估
+**WRF-HR 网格对比（内部评估）**
+```bash
+python run_grid_metrics.py --month 2025-10 --pred-dir processed_data/pred --hr-dir processed_data/hr --out processed_data/summary/metrics_grid_overall_2025-10.csv
+```
+
+**站点/雷达评估（外部验证）**
+```bash
+python run_evaluation.py --pred processed_data/pred/pred_unet_2025-10.zarr
+```
+
+## 常用汇总/出图脚本
+- `run_eval_all.py`：批量评估多个预测结果
+- `run_case_maps.py`：个例风场/误差图
+- `run_physics_consistency.py`：散度/频谱一致性统计
+- `run_make_paper_figs.py`：论文图表汇总
+
+## 说明
+- HR/LR 使用 4×缩放（`DOWNSAMPLE_FACTOR=4`），名义分辨率约为 3 km → 1 km。
+- 若在 PowerShell 使用多行命令，请用反引号 `（不是 ^）进行换行。
