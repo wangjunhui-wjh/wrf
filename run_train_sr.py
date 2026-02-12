@@ -68,6 +68,12 @@ def main():
     parser.add_argument("--pretrain-epochs", type=int, default=5, help="Pretrain epochs (data loss only)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--lambda-pde", type=float, default=0.1, help="Physics loss weight")
+    parser.add_argument("--pde-div-only", action="store_true", help="Use divergence-only physics loss (ignore momentum term)")
+    parser.add_argument("--pde-residual", action="store_true", help="Apply physics loss on residual (pred - bicubic upsample)")
+    parser.add_argument("--pde-bicubic", action="store_true", help="Use bicubic upsample for residual physics loss base")
+    parser.add_argument("--pde-highpass-k", type=int, default=0, help="High-pass filter size for physics loss (0=off)")
+    parser.add_argument("--pde-start-frac", type=float, default=None,
+                        help="Start physics loss at this fraction of epochs (e.g., 0.7). Overrides pretrain-epochs.")
     parser.add_argument("--lambda-scale", type=float, default=0.0, help="Scale consistency loss weight")
     parser.add_argument("--residual", action="store_true", help="Predict residual on top of bicubic upsample")
     parser.add_argument("--samples-per-epoch", type=int, default=2000, help="Training samples per epoch")
@@ -157,9 +163,27 @@ def main():
     log_path.write_text("epoch,train_loss,val_loss\n", encoding="utf-8")
 
     best_val = float("inf")
+
+    def _pde_weight(epoch):
+        if args.pde_start_frac is not None:
+            start = int(np.floor(args.epochs * args.pde_start_frac))
+        else:
+            start = args.pretrain_epochs
+        if epoch <= start:
+            return 0.0
+        span = max(1, args.epochs - start)
+        return args.lambda_pde * (epoch - start) / span
+
+    def _highpass(x, k):
+        if k is None or k <= 1:
+            return x
+        pad = k // 2
+        low = torch.nn.functional.avg_pool2d(x, kernel_size=k, stride=1, padding=pad)
+        return x - low
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_losses = []
+        pde_weight = _pde_weight(epoch)
         for lr_arr, hr_arr in train_loader:
             if torch.is_tensor(lr_arr):
                 x = lr_arr.to(args.device)
@@ -171,27 +195,41 @@ def main():
                 y = torch.from_numpy(hr_arr).to(args.device)
 
             lr_target_norm = None
-            if args.residual or args.lambda_scale > 0:
+            if args.residual or args.lambda_scale > 0 or args.pde_residual:
                 lr_target_norm = _lr_target_norm(x, input_vars, target_vars, input_stats, target_stats)
-            pred = model(x)
+            pred_raw = model(x)
+            pred = pred_raw
             if args.residual:
                 base = torch.nn.functional.interpolate(
                     lr_target_norm, scale_factor=args.scale, mode="bilinear", align_corners=False
                 )
-                pred = pred + base
+                pred = pred_raw + base
             l_data = loss_data(pred, y)
 
-            if args.model == "physr" and epoch > args.pretrain_epochs:
-                if "PSFC" in input_vars:
+            if args.model == "physr" and pde_weight > 0:
+                if args.pde_div_only:
+                    p_hr = None
+                elif "PSFC" in input_vars:
                     idx = input_vars.index("PSFC")
                     p_lr = x[:, idx:idx + 1, :, :]
                     p_hr = torch.nn.functional.interpolate(p_lr, scale_factor=args.scale, mode="bilinear", align_corners=False)
                 else:
                     p_hr = None
-                pred_u = pred[:, 0:1]
-                pred_v = pred[:, 1:2]
+                if args.pde_residual:
+                    if lr_target_norm is None:
+                        lr_target_norm = _lr_target_norm(x, input_vars, target_vars, input_stats, target_stats)
+                    base_mode = "bicubic" if args.pde_bicubic else "bilinear"
+                    base_phy = torch.nn.functional.interpolate(
+                        lr_target_norm, scale_factor=args.scale, mode=base_mode, align_corners=False
+                    )
+                    pred_for_pde = pred - base_phy
+                else:
+                    pred_for_pde = pred_raw if args.residual else pred
+                pred_for_pde = _highpass(pred_for_pde, args.pde_highpass_k)
+                pred_u = pred_for_pde[:, 0:1]
+                pred_v = pred_for_pde[:, 1:2]
                 l_phy = physics_loss(pred_u, pred_v, pressure=p_hr)
-                loss = l_data + args.lambda_pde * l_phy
+                loss = l_data + pde_weight * l_phy
             else:
                 loss = l_data
 

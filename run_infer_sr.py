@@ -108,6 +108,7 @@ def main():
     parser.add_argument("--batch", type=int, default=8, help="Inference batch size")
     parser.add_argument("--stats", default="", help="JSON stats for normalization")
     parser.add_argument("--out-dir", default="processed_data/pred", help="Output directory")
+    parser.add_argument("--out", default="", help="Optional output zarr path (or directory)")
     parser.add_argument("--static-vars", default="", help="Static vars from grid_static (e.g., HGT)")
     parser.add_argument("--grid-static", default="processed_data/grid_static.zarr", help="Grid static zarr")
     parser.add_argument("--residual", action="store_true", help="Predict residual on top of bicubic upsample")
@@ -136,8 +137,21 @@ def main():
         model = model.to(args.device)
         model.eval()
 
-    out_root = Path(args.out_dir)
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_mode = "dir"
+    if args.out:
+        out_base = Path(args.out)
+        if out_base.suffix == ".zarr":
+            out_mode = "file"
+        else:
+            out_mode = "dir"
+    else:
+        out_base = Path(args.out_dir)
+        if out_base.suffix == ".zarr":
+            out_mode = "file"
+
+    if out_mode == "dir":
+        out_root = Path(out_base)
+        out_root.mkdir(parents=True, exist_ok=True)
 
     static_lr = _load_static_lr(args.grid_static, static_vars, args.scale, static_stats) if static_vars else None
 
@@ -173,7 +187,13 @@ def main():
         if out_h != hr_h or out_w != hr_w:
             print(f"Warning: pred size {out_h}x{out_w} != HR {hr_h}x{hr_w}. Writing top-left {write_h}x{write_w}.")
 
-        out_path = out_root / f"pred_{args.model}_{month}.zarr"
+        if out_mode == "file":
+            if len(months) == 1:
+                out_path = Path(out_base)
+            else:
+                out_path = Path(out_base).with_name(f"{Path(out_base).stem}_{month}.zarr")
+        else:
+            out_path = out_root / f"pred_{args.model}_{month}.zarr"
         store = zarr.DirectoryStore(str(out_path))
         root = zarr.group(store=store, overwrite=True)
         root.create_dataset("time", data=time_vals, dtype=time_vals.dtype)
